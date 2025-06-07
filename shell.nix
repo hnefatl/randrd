@@ -3,11 +3,15 @@
 { pkgs ? import <nixpkgs> {} }:
   let
     overrides = (builtins.fromTOML (builtins.readFile ./rust-toolchain.toml));
-    libPath = with pkgs; lib.makeLibraryPath [
+    nativeLibs = with pkgs; [
       # load external libraries that you need in your rust project here
+      pkg-config
+      xorg.libX11.dev
+      xorg.libXrandr
     ];
 in
   pkgs.mkShell rec {
+    nativeBuildInputs = nativeLibs;
     buildInputs = with pkgs; [
       clang
       # Replace llvmPackages with llvmPackages_X, where X is the latest LLVM version (at the time of writing, 16)
@@ -25,7 +29,7 @@ in
     RUSTFLAGS = (builtins.map (a: ''-L ${a}/lib'') [
       # add libraries here (e.g. pkgs.libvmi)
     ]);
-    LD_LIBRARY_PATH = libPath;
+    LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath nativeLibs;
     # Add glibc, clang, glib, and other headers to bindgen search path
     BINDGEN_EXTRA_CLANG_ARGS =
     # Includes normal include path
