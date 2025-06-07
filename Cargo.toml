@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.98"
+clap = { version = "4.5.39", features = ["derive"] }
+pidfile2 = "0.1.1"
+x11rb = { version = "0.13.1", features = ["randr"] }
