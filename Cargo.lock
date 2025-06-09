@@ -169,6 +169,7 @@ checksum = "bd070e393353796e801d209ad339e89596eb4c8d430d18ede6a1cced8fafbd99"
 dependencies = [
  "autocfg",
  "hashbrown",
+ "serde",
 ]
 
 [[package]]
@@ -506,12 +507,11 @@ dependencies = [
 [[package]]
 name = "xrandr"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67a14ec30c869847f1d2f4632d38e0360b0b3380cbb12ac241bfe24050a6a8de"
 dependencies = [
  "indexmap",
  "itertools",
  "libc",
+ "serde",
  "thiserror",
  "time",
  "x11",

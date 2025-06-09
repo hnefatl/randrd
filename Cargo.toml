@@ -7,7 +7,8 @@ edition = "2024"
 anyhow = "1.0.98"
 clap = { version = "4.5.39", features = ["derive"] }
 pidfile2 = "0.1.1"
-xrandr = "0.2.0"
+xrandr = { path = "../xrandr-rs", features = ["serialize"] }
+#xrandr = { git = "https://github.com/hnefatl/xrandr-rs", rev = "", features = ["serialize"] }
 edid = "0.3.0"
 nom = "3.2.0"
 ron = "0.10.1"

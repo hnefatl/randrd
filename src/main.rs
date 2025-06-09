@@ -1,9 +1,10 @@
 use core::f64;
-use std::{collections::HashMap, ops::Deref, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf};
 
-use anyhow::{self, Context};
+use anyhow::{self, Context, bail};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+use xrandr::ScreenResources;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -25,14 +26,14 @@ struct Config {
 struct MonitorSpec {
     width: u32,
     height: u32,
-    refresh_rate: Option<f64>,  // Refresh rate may not match exactly, closest wins.
+    refresh_rate: Option<f64>, // Refresh rate may not match exactly, closest wins.
 
     #[serde(default)]
     primary: bool,
     #[serde(default)]
     rotation: xrandr::Rotation,
-    x: u32,
-    y: u32,
+    x: i32,
+    y: i32,
 }
 
 impl MonitorSpec {
@@ -57,51 +58,105 @@ fn get_edid(output: &xrandr::Output) -> anyhow::Result<edid::EDID> {
     }
 }
 
-enum MonitorResult {
-    Ok(),
-    Skipped(String),
+// An `xrandr::Mode` object with limited equality scope.
+#[derive(Debug)]
+struct LimitedMode {
+    inner: xrandr::Mode,
+}
+impl PartialEq for LimitedMode {
+    fn eq(&self, other: &Self) -> bool {
+        return self.inner.height == other.inner.height;
+    }
+}
+impl Eq for LimitedMode {}
+
+#[derive(Default, Debug, PartialEq, Eq)]
+struct Diff {
+    primary: Option<bool>,
+    position: Option<(i32, i32)>,
+    rotation: Option<xrandr::Rotation>,
+    mode: Option<LimitedMode>,
 }
 
-fn process_monitor(
+fn get_monitor_diff<'a>(
     xhandle: &mut xrandr::XHandle,
     config: &Config,
-    monitor: &xrandr::Monitor,
-    modes: &Vec<xrandr::Mode>,
-) -> anyhow::Result<MonitorResult> {
-    macro_rules! skip {
-        ($($arg:tt)*) => { return Ok(MonitorResult::Skipped(format!($($arg)*))); };
-    }
+    monitor: &'a xrandr::Monitor,
+    screen_resources: &xrandr::ScreenResources,
+) -> anyhow::Result<(&'a xrandr::Output, Diff)> {
+    let mut diff = Diff::default();
 
     let Some(monitor_config) = config.monitors.get(&monitor.name) else {
-        skip!("unconfigured");
+        bail!("unconfigured");
     };
     let [output] = &monitor.outputs[..] else {
-        skip!(
+        bail!(
             "has >1 output: {:?}",
             monitor.outputs.iter().map(|o| &o.name)
         );
     };
-
-    let compatible_modes = monitor_config.get_compatible_modes(&modes);
-    if compatible_modes.is_empty() {
-        skip!("unable to find compatible modes");
+    let Some(crtc_id) = output.crtc else {
+        bail!(
+            "required exactly 1 CRTC associated with output {}, got {:?} and {:?}",
+            output.name,
+            output.crtc,
+            output.crtcs
+        );
     };
-    if let Some(current_mode) = output
+    let crtc = screen_resources.crtc(xhandle, crtc_id)?;
+    if crtc.rotation != monitor_config.rotation {
+        diff.rotation = Some(monitor_config.rotation);
+    }
+    if (crtc.x, crtc.y) != (monitor_config.x, monitor_config.y) {
+        diff.position = Some((monitor_config.x, monitor_config.y));
+    }
+
+    let compatible_modes = monitor_config.get_compatible_modes(&screen_resources.modes);
+    if compatible_modes.is_empty() {
+        bail!(
+            "unable to find compatible modes: {:?}",
+            screen_resources.modes
+        );
+    };
+    if !output
         .current_mode
-        .and_then(|id| compatible_modes.iter().find(|m| m.xid == id))
+        .is_some_and(|id| compatible_modes.iter().any(|m| m.xid == id))
     {
-        skip!("already assigned a compatible mode: {}", current_mode.name);
+        let [compatible_mode] = compatible_modes[..] else {
+            bail!(
+                "found >1 compatible modes, can't choose: {:?}",
+                compatible_modes
+            );
+        };
+        diff.mode = Some(LimitedMode {
+            inner: compatible_mode.clone(),
+        });
     }
-    if let [compatible_mode] = compatible_modes[..] {
-        xhandle.set_mode(output, compatible_mode)?;
-        xhandle.set_rotation(output, monitor_config.rotation.into())?;
-        xhandle.set_position(output, relation, relative_output)
-        return Ok(MonitorResult::Ok());
+    Ok((output, diff))
+}
+
+fn apply_monitor_diff(
+    xhandle: &mut xrandr::XHandle,
+    output: &xrandr::Output,
+    diff: Diff,
+) -> anyhow::Result<()> {
+    match diff.primary {
+        // TODO: why doesn't this have an error return type?
+        Some(true) => xhandle.set_primary(output),
+        // TODO: no library call available here???
+        Some(false) => unimplemented!(),
+        _ => {}
     }
-    skip!(
-        "found >1 compatible modes, can't choose: {:?}",
-        compatible_modes
-    );
+    if let Some((x, y)) = diff.position {
+        xhandle.set_absolute_position(output, x, y)?;
+    }
+    if let Some(rotation) = diff.rotation {
+        xhandle.set_rotation(output, &rotation)?;
+    }
+    if let Some(mode) = diff.mode {
+        xhandle.set_mode(output, &mode.inner)?;
+    }
+    Ok(())
 }
 
 fn main() -> anyhow::Result<()> {
@@ -109,15 +164,16 @@ fn main() -> anyhow::Result<()> {
     let _pid_file = pidfile::PidFile::new(args.pid_file).context("Opening PID lockfile")?;
 
     let mut xhandle = xrandr::XHandle::open()?;
-    let modes = xrandr::ScreenResources::new(&mut xhandle)?.modes();
+    let sr = xrandr::ScreenResources::new(&mut xhandle)?;
 
     for monitor in xhandle.monitors()? {
-        match process_monitor(&mut xhandle, &args.config, &monitor, &modes) {
-            Ok(MonitorResult::Ok()) => {}
-            Ok(MonitorResult::Skipped(reason)) => {
-                println!("Skipped monitor {}: {}", monitor.name, reason)
+        match get_monitor_diff(&mut xhandle, &args.config, &monitor, &sr) {
+            Ok((_, diff)) if diff == Diff::default() => {}
+            Ok((output, diff)) => {
+                println!("Monitor {} has diff: {:?}", monitor.name, diff);
+                apply_monitor_diff(&mut xhandle, output, diff)?;
             }
-            Err(e) => println!("{}", e),
+            Err(e) => println!("{:?}", e),
         }
     }
     Ok(())
