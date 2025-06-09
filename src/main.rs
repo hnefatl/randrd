@@ -1,5 +1,5 @@
 use core::f64;
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, intrinsics::copysignf16, path::PathBuf};
 
 use anyhow::{self, Context, bail};
 use clap::Parser;
@@ -18,31 +18,22 @@ struct Args {
 struct Config {
     // Monitor name to desired config
     // Keying on name might need adjusting in the future since there's no guarantee that monitor names are unique between my computers.
-    monitors: HashMap<String, MonitorConfig>,
+    monitors: HashMap<String, MonitorSpec>,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
-struct MonitorConfig {
+struct MonitorSpec {
     width: u32,
     height: u32,
     // Refresh rate may not match exactly, closest wins.
-    refresh_rate: f64,
+    refresh_rate: Option<f64>,
 }
+impl MonitorSpec {
+    fn get_compatible_modes<'a>(&self, modes: &'a [xrandr::Mode]) -> Vec<&'a xrandr::Mode> {
+        let mut compatible: &mut dyn Iterator<Item = &'a xrandr::Mode> = &modes.iter();
+        compatible = compatible.filter(|m| (self.width, self.height) == (m.width, m.height));
 
-fn get_closest_mode<'a>(
-    config: &MonitorConfig,
-    modes: &'a [xrandr::Mode],
-) -> Option<&'a xrandr::Mode> {
-    let (mut closest_diff, mut closest_mode) = (f64::MAX, None);
-    for mode in modes {
-        if (config.width, config.height) != (mode.width, mode.height) {
-            continue;
-        }
-        let diff = f64::abs(config.refresh_rate - mode.rate);
-        if diff < closest_diff {
-            (closest_diff, closest_mode) = (diff, Some(mode));
-        }
+        compatible.collect()
     }
-    closest_mode
 }
 
 fn get_edid(output: &xrandr::Output) -> anyhow::Result<edid::EDID> {
