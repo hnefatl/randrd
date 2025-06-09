@@ -1,5 +1,5 @@
 use core::f64;
-use std::{collections::HashMap, intrinsics::copysignf16, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf};
 
 use anyhow::{self, Context, bail};
 use clap::Parser;
@@ -28,11 +28,17 @@ struct MonitorSpec {
     refresh_rate: Option<f64>,
 }
 impl MonitorSpec {
-    fn get_compatible_modes<'a>(&self, modes: &'a [xrandr::Mode]) -> Vec<&'a xrandr::Mode> {
-        let mut compatible: &mut dyn Iterator<Item = &'a xrandr::Mode> = &modes.iter();
-        compatible = compatible.filter(|m| (self.width, self.height) == (m.width, m.height));
+    const REFRESH_RATE_TOLERANCE: f64 = 1.0;
 
-        compatible.collect()
+    fn get_compatible_modes<'a>(&self, modes: &'a [xrandr::Mode]) -> Vec<&'a xrandr::Mode> {
+        modes
+            .iter()
+            .filter(|m| (self.width, self.height) == (m.width, m.height))
+            .filter(|m| {
+                self.refresh_rate
+                    .is_none_or(|r| f64::abs(r - m.rate) < Self::REFRESH_RATE_TOLERANCE)
+            })
+            .collect()
     }
 }
 
@@ -54,27 +60,35 @@ fn main() -> anyhow::Result<()> {
             println!("Skipping unconfigured monitor: {}", monitor.name);
             continue;
         };
-        let Some(closest_mode) = get_closest_mode(monitor_config, &modes) else {
-            println!("Unable to find closest mode for monitor {}: ", monitor.name);
-            continue;
-        };
         let [output] = &monitor.outputs[..] else {
             println!("Skipping monitor with >1 output: {}", monitor.name);
             continue;
         };
-        if output.current_mode == Some(closest_mode.xid) {
+
+        let compatible_modes = monitor_config.get_compatible_modes(&modes);
+        if compatible_modes.is_empty() {
             println!(
-                "Skipping monitor already assigned closest mode: {}",
+                "Unable to find compatible modes for monitor {}: ",
+                monitor.name
+            );
+            continue;
+        };
+        if output
+            .current_mode
+            .is_some_and(|id| compatible_modes.iter().any(|m| m.xid == id))
+        {
+            println!(
+                "Skipping monitor already assigned a compatible mode: {}",
                 monitor.name
             );
             continue;
         }
-        let current_mode_desc = output
-            .current_mode
-            .and_then(|id| modes.iter().find(|m| m.xid == id));
-        println!("{:?} {:?}", output.current_mode, current_mode_desc);
-        println!("{} {:?}", closest_mode.xid, closest_mode);
-        println!("Need to update");
+        if let [compatible_mode] = compatible_modes[..] {
+            println!("Single compatible mode, updating: {:?}", compatible_mode);
+            xhandle.set_mode(output, compatible_mode)?;
+        } else {
+            println!("Expected exactly one compatible mode for monitor {}, found: {:?}", monitor.name, compatible_modes);
+        }
     }
     Ok(())
 }
